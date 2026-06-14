@@ -1,5 +1,6 @@
 #pragma once
 #include <QDBusAbstractAdaptor>
+#include <QDBusMessage>
 #include <QDBusObjectPath>
 #include <QObject>
 #include <QString>
@@ -10,11 +11,18 @@ class IwdAgent : public QDBusAbstractAdaptor {
 
 public:
   explicit IwdAgent(QObject *parent = nullptr);
+  void sendPassphrase(const QString &passphrase);
 
-  Q_INVOKABLE QString RequestPassphrase(const QDBusObjectPath &network);
-  Q_INVOKABLE void Cancel(const QString &reason);
-  Q_INVOKABLE void Release();
+public slots:
+  QString RequestPassphrase(const QDBusObjectPath &network,
+                            const QDBusMessage &msg);
+
+  void Cancel(const QString &reason);
+  void Release();
 
 signals:
   void passphraseRequested(const QString &networkPath);
+
+private:
+  QDBusMessage m_pendingMessage;
 };

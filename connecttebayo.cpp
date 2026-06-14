@@ -5,29 +5,15 @@
 #include <QProcess>
 
 Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {
-  QDBusConnection bus = QDBusConnection::systemBus();
-
-  // listening propery changes
-  bus.connect("net.connman.iwd", "/net/connman/iwd/0/5",
-              "org.freedesktop.DBus.Properties", "PropertiesChanged", this,
-              SLOT(onPropertiesChanged(QString, QVariantMap, QStringList))
-
-  );
 
   // agent register
   m_agent = new IwdAgent(&m_agentObject);
-  bus.registerObject("/com/ryuzinoh/connecttebayo/agent", &m_agentObject);
-  QDBusInterface agentManager("net.connman.iwd", "/net/connman/iwd",
-                              "net.connman.iwd.AgentManager", bus);
-  QDBusReply<void> reply = agentManager.call(
-      "RegisterAgent", QVariant::fromValue(QDBusObjectPath(
-                           "/com/ryuzinoh/connecttebayo/agent")));
+  QDBusConnection::systemBus().registerObject(
+      "/com/ryuzinoh/connecttebayo/agent", &m_agentObject);
 
-  if (!reply.isValid()) {
-    qWarning() << "Agent registration failure: " << reply.error().message();
-  } else {
-    qDebug() << "IWD agent registered";
-  }
+  connect(m_agent, &IwdAgent::passphraseRequested, this,
+          &Connecttebayo::setPromptingPath);
+  updateStationPath();
 }
 
 void Connecttebayo::onPropertiesChanged(const QString &interface,
@@ -51,15 +37,19 @@ void Connecttebayo::onPropertiesChanged(const QString &interface,
 }
 // scanning networks
 void Connecttebayo::fetchNetworks() {
+  // updateStationPath();  // in case iwd somehow changes in runtime
+  if (m_stationPath.isEmpty()) {
+    return;
+  }
   QDBusConnection bus = QDBusConnection::systemBus();
-  QDBusInterface station("net.connman.iwd", "/net/connman/iwd/0/5",
+  QDBusInterface station("net.connman.iwd", m_stationPath,
                          "net.connman.iwd.Station", bus);
 
   station.call("Scan");
 
   // ordered network viw busctl
   QProcess p;
-  p.start("busctl", {"call", "net.connman.iwd", "/net/connman/iwd/0/5",
+  p.start("busctl", {"call", "net.connman.iwd", m_stationPath,
                      "net.connman.iwd.Station", "GetOrderedNetworks"});
   p.waitForFinished(5000);
   QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
@@ -110,12 +100,15 @@ void Connecttebayo::connectNetwork(const QString &networkPath) {
 }
 
 void Connecttebayo::fetchDevices() {
+  if (m_stationPath.isEmpty()) {
+    return;
+  }
   QDBusConnection bus = QDBusConnection::systemBus();
   if (!bus.isConnected()) {
     qWarning() << "Can't connect to system bus";
     return;
   }
-  QDBusInterface station("net.connman.iwd", "/net/connman/iwd/0/5",
+  QDBusInterface station("net.connman.iwd", m_stationPath,
                          "org.freedesktop.DBus.Properties", bus);
 
   QDBusReply<QVariant> state =
@@ -153,8 +146,11 @@ void Connecttebayo::fetchDevices() {
 }
 
 void Connecttebayo::disconnect() {
+  if (m_stationPath.isEmpty()) {
+    return;
+  }
   QDBusConnection bus = QDBusConnection::systemBus();
-  QDBusInterface station{"net.connman.iwd", "/net/connman/iwd/0/5",
+  QDBusInterface station{"net.connman.iwd", m_stationPath,
                          "net.connman.iwd.Station", bus};
 
   QDBusReply<void> reply = station.call("Disconnect");
@@ -162,5 +158,93 @@ void Connecttebayo::disconnect() {
     qWarning() << "Disconnect failure: " << reply.error().message();
   } else {
     qDebug() << "Disconnected!";
+  }
+}
+
+// dynamic state detection
+QString Connecttebayo::getStationPath() {
+  QDBusConnection bus = QDBusConnection::systemBus();
+
+  QDBusInterface manager("net.connman.iwd", "/",
+                         "org.freedesktop.DBus.ObjectManager", bus);
+
+  QDBusMessage reply = manager.call("GetManagedObjects");
+
+  if (reply.type() == QDBusMessage::ErrorMessage ||
+      reply.arguments().isEmpty()) {
+    return "";
+  }
+
+  const QDBusArgument &arg = reply.arguments().at(0).value<QDBusArgument>();
+  if (arg.currentType() != QDBusArgument::MapType) {
+    return "";
+  }
+
+  QString foundPath;
+
+  arg.beginMap();
+  while (!arg.atEnd()) {
+    arg.beginMapEntry();
+    QDBusObjectPath path;
+    arg >> path;
+
+    arg.beginMap();
+    while (!arg.atEnd()) {
+      arg.beginMapEntry();
+      QString interfaceName;
+      arg >> interfaceName;
+
+      QVariant properties;
+      arg >> properties;
+
+      if (interfaceName == "net.connman.iwd.Station" && foundPath.isEmpty()) {
+        foundPath = path.path();
+      }
+      arg.endMapEntry();
+    }
+    arg.endMap();
+    arg.endMapEntry();
+  }
+  arg.endMap();
+  return foundPath;
+}
+void Connecttebayo::updateStationPath() {
+
+  QString newPath = getStationPath();
+  if (newPath.isEmpty() || newPath == m_stationPath) {
+    return;
+  }
+
+  QDBusConnection bus = QDBusConnection::systemBus();
+
+  if (!m_stationPath.isEmpty()) {
+    bus.disconnect(
+        "net.connman.iwd", m_stationPath, "org.freedesktop.DBus.Properties",
+        "PropertiesChanged", this,
+        SLOT(onPropertiesChanged(QString, QVariantMap, QStringList)));
+  }
+
+  m_stationPath = newPath;
+
+  bus.connect("net.connman.iwd", m_stationPath,
+              "org.freedesktop.DBus.Properties", "PropertiesChanged", this,
+              SLOT(onPropertiesChanged(QString, QVariantMap, QStringList)));
+
+  QDBusInterface agentManager("net.connman.iwd", "/net/connman/iwd",
+                              "net.connman.iwd.AgentManager", bus);
+  QDBusReply<void> agent = agentManager.call(
+      "RegisterAgent", QVariant::fromValue(QDBusObjectPath(
+                           "/com/ryuzinoh/connecttebayo/agent")));
+  if (!agent.isValid()) {
+    qWarning() << "Agent registration failure: " << agent.error().message();
+  } else {
+    qDebug() << "IWD agent registered";
+  }
+}
+
+void Connecttebayo::setPromptingPath(const QString &path) {
+  if (m_promptingPath != path) {
+    m_promptingPath = path;
+    emit promptingPathChanged();
   }
 }

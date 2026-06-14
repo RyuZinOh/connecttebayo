@@ -29,13 +29,21 @@ public:
 signals:
   void networksChanged();
   void stateChanged();
+  void promptingPathChanged();
 
 private:
   NetworkModel m_model;
   QString m_state;
   QString m_connectedSsid;
+  QString m_stationPath;
+  QString m_promptingPath;
   QObject m_agentObject;
+
   IwdAgent *m_agent;
+
+  QString getStationPath();
+  void updateStationPath();
+  void setPromptingPath(const QString &path);
 
 private slots:
   void onPropertiesChanged(const QString &interface, const QVariantMap &changed,
