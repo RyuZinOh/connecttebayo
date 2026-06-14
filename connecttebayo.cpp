@@ -51,7 +51,7 @@ void Connecttebayo::fetchNetworks() {
 
   // first splitting by space
   QStringList tokens = out.split(' ', Qt::SkipEmptyParts);
-  m_networks.clear();
+  QList<NetworkEntry> entries;
 
   /*
     start from 2, prior  is kinda ignored  where the first or 2 is the path
@@ -60,7 +60,7 @@ void Connecttebayo::fetchNetworks() {
   */
   for (int i = 2; i < tokens.size() - 1; i = i + 2) {
     QString path = tokens[i].remove('"');
-    QString signal = tokens[i + 1];
+    int signal = tokens[i + 1].toInt();
 
     QDBusInterface network("net.connman.iwd", path,
                            "org.freedesktop.DBus.Properties", bus);
@@ -69,17 +69,14 @@ void Connecttebayo::fetchNetworks() {
         network.call("Get", "net.connman.iwd.Network", "Name");
     QDBusReply<QVariant> connected =
         network.call("Get", "net.connman.iwd.Network", "Connected");
-    QVariantMap entry;
-    entry["ssid"] = name.value().toString();
-    entry["signal"] = signal.toInt();
-    entry["connected"] = connected.value().toBool();
-    entry["path"] = path;
-    m_networks.append(entry);
+    entries.append(
+        {name.value().toString(), path, signal, connected.value().toBool()});
 
     qDebug() << "\nSSID:" << name.value().toString() << "\nSignal: " << signal
              << "\nConnected: " << connected.value().toBool()
              << "\nPath: " << path;
   }
+  m_model.setNetworks(entries);
   emit networksChanged();
 }
 
