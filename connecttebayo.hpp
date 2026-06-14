@@ -1,4 +1,5 @@
 #pragma once
+#include "./iwdagent.hpp"
 #include "./networkmodel.hpp"
 #include <QObject>
 #include <QString>
@@ -33,6 +34,8 @@ private:
   NetworkModel m_model;
   QString m_state;
   QString m_connectedSsid;
+  QObject m_agentObject;
+  IwdAgent *m_agent;
 
 private slots:
   void onPropertiesChanged(const QString &interface, const QVariantMap &changed,

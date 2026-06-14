@@ -14,6 +14,8 @@ qt_add_qml_module(connecttebayo
     connecttebayo.cpp
     networkmodel.hpp
     networkmodel.cpp
+    iwdagent.hpp
+    iwdagent.cpp
   NO_PLUGIN_OPTIONAL
   OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/connecttebayo"
 )

@@ -13,6 +13,21 @@ Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {
               SLOT(onPropertiesChanged(QString, QVariantMap, QStringList))
 
   );
+
+  // agent register
+  m_agent = new IwdAgent(&m_agentObject);
+  bus.registerObject("/com/ryuzinoh/connecttebayo/agent", &m_agentObject);
+  QDBusInterface agentManager("net.connman.iwd", "/net/connman/iwd",
+                              "net.connman.iwd.AgentManager", bus);
+  QDBusReply<void> reply = agentManager.call(
+      "RegisterAgent", QVariant::fromValue(QDBusObjectPath(
+                           "/com/ryuzinoh/connecttebayo/agent")));
+
+  if (!reply.isValid()) {
+    qWarning() << "Agent registration failure: " << reply.error().message();
+  } else {
+    qDebug() << "IWD agent registered";
+  }
 }
 
 void Connecttebayo::onPropertiesChanged(const QString &interface,
