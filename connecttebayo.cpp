@@ -4,8 +4,36 @@
 #include <QDBusReply>
 #include <QProcess>
 
-Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {}
+Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {
+  QDBusConnection bus = QDBusConnection::systemBus();
 
+  // listening propery changes
+  bus.connect("net.connman.iwd", "/net/connman/iwd/0/5",
+              "org.freedesktop.DBus.Properties", "PropertiesChanged", this,
+              SLOT(onPropertiesChanged(QString, QVariantMap, QStringList))
+
+  );
+}
+
+void Connecttebayo::onPropertiesChanged(const QString &interface,
+                                        const QVariantMap &changed,
+                                        const QStringList &invalidated) {
+  Q_UNUSED(invalidated)
+  qDebug() << "PropertiesChanged on: " << interface << changed.keys();
+
+  if (interface == "net.connman.iwd.Station") {
+    if (changed.contains("State")) {
+      m_state = changed["State"].toString();
+      emit stateChanged();
+      fetchDevices();
+      fetchNetworks();
+    }
+    if (changed.contains("ConnectedNetwork")) {
+      fetchDevices();
+      fetchNetworks();
+    }
+  }
+}
 // scanning networks
 void Connecttebayo::fetchNetworks() {
   QDBusConnection bus = QDBusConnection::systemBus();
@@ -23,6 +51,7 @@ void Connecttebayo::fetchNetworks() {
 
   // first splitting by space
   QStringList tokens = out.split(' ', Qt::SkipEmptyParts);
+  m_networks.clear();
 
   /*
     start from 2, prior  is kinda ignored  where the first or 2 is the path
@@ -40,15 +69,23 @@ void Connecttebayo::fetchNetworks() {
         network.call("Get", "net.connman.iwd.Network", "Name");
     QDBusReply<QVariant> connected =
         network.call("Get", "net.connman.iwd.Network", "Connected");
+    QVariantMap entry;
+    entry["ssid"] = name.value().toString();
+    entry["signal"] = signal.toInt();
+    entry["connected"] = connected.value().toBool();
+    entry["path"] = path;
+    m_networks.append(entry);
 
     qDebug() << "\nSSID:" << name.value().toString() << "\nSignal: " << signal
              << "\nConnected: " << connected.value().toBool()
              << "\nPath: " << path;
   }
+  emit networksChanged();
 }
 
 void Connecttebayo::connectNetwork(const QString &networkPath) {
   QDBusConnection bus = QDBusConnection::systemBus();
+  qDebug() << "Attempt: " << networkPath;
   QDBusInterface network("net.connman.iwd", networkPath,
                          "net.connman.iwd.Network", bus);
 
@@ -73,8 +110,12 @@ void Connecttebayo::fetchDevices() {
       station.call("Get", "net.connman.iwd.Station", "State");
 
   if (state.isValid()) {
+    m_state = state.value().toString();
+    emit stateChanged();
     qDebug() << "Station state: " << state.value().toString();
   } else {
+    m_connectedSsid = "";
+    emit stateChanged();
     qWarning() << "Failed to get state: " << state.error().message();
   }
 
@@ -92,6 +133,8 @@ void Connecttebayo::fetchDevices() {
         network.call("Get", "net.connman.iwd.Network", "Name");
 
     if (name.isValid()) {
+      m_connectedSsid = name.value().toString();
+      emit stateChanged();
       qDebug() << "Connected SSID: " << name.value().toString();
     }
   }
