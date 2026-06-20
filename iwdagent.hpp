@@ -12,6 +12,7 @@ class IwdAgent : public QDBusAbstractAdaptor {
 public:
   explicit IwdAgent(QObject *parent = nullptr);
   void sendPassphrase(const QString &passphrase);
+  void cancelPassphrase();
 
 public slots:
   QString RequestPassphrase(const QDBusObjectPath &network,

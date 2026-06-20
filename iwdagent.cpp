@@ -22,6 +22,15 @@ void IwdAgent::sendPassphrase(const QString &passphrase) {
   m_pendingMessage = QDBusMessage();
 }
 
+void IwdAgent::cancelPassphrase() {
+  if (m_pendingMessage.type() == QDBusMessage::InvalidMessage) {
+    return;
+  }
+  QDBusMessage error = m_pendingMessage.createErrorReply(
+      "net.connman.iwd.Agent.Error.Canceled", "User Canceled");
+  QDBusConnection::systemBus().send(error);
+  m_pendingMessage = QDBusMessage();
+}
 void IwdAgent::Cancel(const QString &reason) {
   Q_UNUSED(reason);
   m_pendingMessage = QDBusMessage();

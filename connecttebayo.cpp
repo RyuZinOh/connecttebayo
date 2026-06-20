@@ -2,7 +2,6 @@
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusReply>
-#include <QProcess>
 
 Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {
 
@@ -16,27 +15,37 @@ Connecttebayo::Connecttebayo(QObject *parent) : QObject(parent) {
   updateStationPath();
 }
 
+Connecttebayo::~Connecttebayo() {
+  QDBusConnection::systemBus().unregisterObject(
+      "/com/ryuzinoh/connecttebayo/agent");
+  qDebug() << "agent unregistered...";
+}
+
 void Connecttebayo::onPropertiesChanged(const QString &interface,
                                         const QVariantMap &changed,
                                         const QStringList &invalidated) {
   Q_UNUSED(invalidated)
   qDebug() << "PropertiesChanged on: " << interface << changed.keys();
 
-  if (interface == "net.connman.iwd.Station") {
-    if (changed.contains("State")) {
-      m_state = changed["State"].toString();
-      emit stateChanged();
-      fetchDevices();
-      fetchNetworks();
+  if (interface == "net.connman.iwd.Station" && changed.contains("State")) {
+    m_state = changed["State"].toString();
+    emit stateChanged();
+
+    // if (m_state == "disconnected") {
+    //   setConnectedSsid("");
+    // }
+
+    if (m_state == "connected") {
+      setPromptingPath("");
+      setErrorMessage("");
     }
-    if (changed.contains("ConnectedNetwork")) {
-      fetchDevices();
-      fetchNetworks();
+    if (m_state == "connected" || m_state == "disconnected") {
+      fetchNetworks(false);
     }
   }
 }
 // scanning networks
-void Connecttebayo::fetchNetworks() {
+void Connecttebayo::fetchNetworks(bool triggerTheScan) {
   // updateStationPath();  // in case iwd somehow changes in runtime
   if (m_stationPath.isEmpty()) {
     return;
@@ -45,104 +54,117 @@ void Connecttebayo::fetchNetworks() {
   QDBusInterface station("net.connman.iwd", m_stationPath,
                          "net.connman.iwd.Station", bus);
 
-  station.call("Scan");
+  if (triggerTheScan) {
+    station.call("Scan");
+  }
 
   // ordered network viw busctl
-  QProcess p;
-  p.start("busctl", {"call", "net.connman.iwd", m_stationPath,
-                     "net.connman.iwd.Station", "GetOrderedNetworks"});
-  p.waitForFinished(5000);
-  QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+  QDBusMessage reply = station.call("GetOrderedNetworks");
 
-  // first splitting by space
-  QStringList tokens = out.split(' ', Qt::SkipEmptyParts);
-  QList<NetworkEntry> entries;
+  if (reply.type() == QDBusMessage::ErrorMessage ||
+      reply.arguments().isEmpty()) {
+    return;
+  }
 
   /*
-    start from 2, prior  is kinda ignored  where the first or 2 is the path
-   of network, 3 is signal, 4 is secondary path, and 5 is seconary network
-   signal and so on...
+  parsing the array returned by GetOrderedNetworks instead of token
+  guessing/stripping
   */
-  for (int i = 2; i < tokens.size() - 1; i = i + 2) {
-    QString path = tokens[i].remove('"');
-    int signal = tokens[i + 1].toInt();
+  const QDBusArgument &arg = reply.arguments().at(0).value<QDBusArgument>();
+  QList<NetworkEntry> entries;
+  QString currentSsid = "";
 
-    QDBusInterface network("net.connman.iwd", path,
+  arg.beginArray();
+  while (!arg.atEnd()) {
+    arg.beginStructure();
+    QDBusObjectPath netPath;
+    qint16 signal;
+    arg >> netPath >> signal;
+    arg.endStructure();
+    QDBusInterface network("net.connman.iwd", netPath.path(),
                            "org.freedesktop.DBus.Properties", bus);
+    // QDBusReply<QVariant> name =
+    //     network.call("Get", "net.connman.iwd.Network", "Name");
+    // QDBusReply<QVariant> connected =
+    //     network.call("Get", "net.connman.iwd.Network", "Connected");
+    //
+    // QString ssid = name.isValid() ? name.value().toString() : "Unknown";
+    // bool isConnected = connected.isValid() ? connected.value().toBool() :
+    // false;
 
-    QDBusReply<QVariant> name =
-        network.call("Get", "net.connman.iwd.Network", "Name");
-    QDBusReply<QVariant> connected =
-        network.call("Get", "net.connman.iwd.Network", "Connected");
-    entries.append(
-        {name.value().toString(), path, signal, connected.value().toBool()});
-
-    qDebug() << "\nSSID:" << name.value().toString() << "\nSignal: " << signal
-             << "\nConnected: " << connected.value().toBool()
-             << "\nPath: " << path;
+    QDBusReply<QVariantMap> all =
+        network.call("GetAll", "net.connman.iwd.Network");
+    if (!all.isValid()) {
+      qWarning() << "getting all failed: " << netPath.path()
+                 << all.error().message();
+      continue;
+    }
+    QVariantMap props = all.value();
+    qDebug() << "Network:" << props["Name"].toString()
+             << "Connected:" << props["Connected"].toBool()
+             << "Signal:" << signal;
+    QString ssid = props["Name"].toString();
+    bool isConnected = props["Connected"].toBool();
+    if (isConnected) {
+      currentSsid = ssid;
+    }
+    entries.append({ssid, netPath.path(), signal, isConnected});
+    /*
+    qDebug() << "\nSSID:" << ssid << "\nSignal: " << signal
+             << "\nConnected: " << isConnected << "\nPath: " << netPath.path();
+    */
   }
+  arg.endArray();
   m_model.setNetworks(entries);
+  setConnectedSsid(currentSsid);
   emit networksChanged();
 }
 
 void Connecttebayo::connectNetwork(const QString &networkPath) {
+  setErrorMessage("");
+  if (m_connecting) {
+    return;
+  }
+  m_connecting = true;
+
   QDBusConnection bus = QDBusConnection::systemBus();
   qDebug() << "Attempt: " << networkPath;
-  QDBusInterface network("net.connman.iwd", networkPath,
-                         "net.connman.iwd.Network", bus);
+  QDBusInterface *network = new QDBusInterface(
+      "net.connman.iwd", networkPath, "net.connman.iwd.Network", bus, this);
 
-  QDBusReply<void> reply = network.call("Connect");
-  if (!reply.isValid()) {
-    qWarning() << "Connect failure: " << reply.error().message();
-  } else {
-    qDebug() << "Connected to: " << networkPath;
-  }
-}
+  QDBusPendingCall call = network->asyncCall("Connect");
+  QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(call, this);
 
-void Connecttebayo::fetchDevices() {
-  if (m_stationPath.isEmpty()) {
-    return;
-  }
-  QDBusConnection bus = QDBusConnection::systemBus();
-  if (!bus.isConnected()) {
-    qWarning() << "Can't connect to system bus";
-    return;
-  }
-  QDBusInterface station("net.connman.iwd", m_stationPath,
-                         "org.freedesktop.DBus.Properties", bus);
+  connect(watcher, &QDBusPendingCallWatcher::finished, this,
+          [this, networkPath, network](QDBusPendingCallWatcher *watcher) {
+            QDBusPendingReply<> reply = *watcher;
+            if (reply.isError()) {
+              qWarning() << "Connect failure: " << reply.error().message();
+              setErrorMessage(reply.error().message());
 
-  QDBusReply<QVariant> state =
-      station.call("Get", "net.connman.iwd.Station", "State");
+              QDBusConnection bus = QDBusConnection::systemBus();
+              QDBusInterface props("net.connman.iwd", networkPath,
+                                   "org.freedesktop.DBus.Properties", bus);
+              QDBusReply<QVariant> knownReply =
+                  props.call("Get", "net.connman.iwd.Network", "KnownNetwork");
 
-  if (state.isValid()) {
-    m_state = state.value().toString();
-    emit stateChanged();
-    qDebug() << "Station state: " << state.value().toString();
-  } else {
-    m_connectedSsid = "";
-    emit stateChanged();
-    qWarning() << "Failed to get state: " << state.error().message();
-  }
-
-  //  connected network name
-  QDBusReply<QVariant> connectedNet =
-      station.call("Get", "net.connman.iwd.Station", "ConnectedNetwork");
-
-  if (connectedNet.isValid()) {
-    QDBusObjectPath netPath = connectedNet.value().value<QDBusObjectPath>();
-    qDebug() << "Connected Network Path: " << netPath.path();
-
-    QDBusInterface network("net.connman.iwd", netPath.path(),
-                           "org.freedesktop.DBus.Properties", bus);
-    QDBusReply<QVariant> name =
-        network.call("Get", "net.connman.iwd.Network", "Name");
-
-    if (name.isValid()) {
-      m_connectedSsid = name.value().toString();
-      emit stateChanged();
-      qDebug() << "Connected SSID: " << name.value().toString();
-    }
-  }
+              if (knownReply.isValid()) {
+                QDBusObjectPath path =
+                    knownReply.value().value<QDBusObjectPath>();
+                if (path.path() != "/" && !path.path().isEmpty()) {
+                  QDBusInterface knownNet("net.connman.iwd", path.path(),
+                                          "net.connman.iwd.KnownNetwork", bus);
+                  knownNet.call("Forget");
+                }
+              }
+              setPromptingPath("");
+            } else {
+              qDebug() << "Connected to: " << networkPath;
+            }
+            watcher->deleteLater();
+            network->deleteLater();
+            m_connecting = false;
+          });
 }
 
 void Connecttebayo::disconnect() {
@@ -247,4 +269,27 @@ void Connecttebayo::setPromptingPath(const QString &path) {
     m_promptingPath = path;
     emit promptingPathChanged();
   }
+}
+void Connecttebayo::setConnectedSsid(const QString &ssid) {
+  if (m_connectedSsid != ssid) {
+    m_connectedSsid = ssid;
+    emit connectedSsidChanged();
+  }
+}
+
+void Connecttebayo::setErrorMessage(const QString &error) {
+  if (m_errorMessage != error) {
+    m_errorMessage = error;
+    emit errorMessageChanged();
+  }
+}
+
+void Connecttebayo::providePassphrase(const QString &passphrase) {
+  m_agent->sendPassphrase(passphrase);
+}
+
+void Connecttebayo::cancelPassphrase() {
+  m_agent->cancelPassphrase();
+  setPromptingPath("");
+  setErrorMessage("");
 }
